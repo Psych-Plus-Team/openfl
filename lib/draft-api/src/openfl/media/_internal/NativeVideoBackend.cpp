@@ -8,11 +8,6 @@
 #include <string>
 #include <cmath>
 #include <stdio.h>
-#include <algorithm>
-#include <mutex>
-#include <memory>
-#include <unordered_map>
-#include <vector>
 #include <GL/gl.h>
 
 #pragma comment(lib, "opengl32.lib")
@@ -63,28 +58,31 @@ int clamp(int val, int minVal, int maxVal)
 													: val;
 }
 
-struct VideoState
-{
-	IMFSourceReader *reader = nullptr;
-	unsigned char *pixelBuffer = nullptr;
-	int frameWidth = 0;
-	int frameHeight = 0;
-	GLuint yTextureID = 0;
-	GLuint uvTextureID = 0;
-	LONGLONG currentAudioPosition = 0;
-	LONGLONG currentVideoPosition = 0;
-	std::vector<uint8_t> audioLeftover;
-	std::vector<uint8_t> packedYPlane;
-	std::vector<uint8_t> packedUVPlane;
-	std::mutex mutex;
-};
+
+IMFSourceReader *reader = nullptr;
+unsigned char *pixelBuffer = nullptr;
+int frameWidth = 0;
+int frameHeight = 0;
+
+GLuint yTextureID = 0;
+GLuint uvTextureID = 0;
+
+LONGLONG currentAudioPosition = 0;
+LONGLONG currentVideoPosition = 0;
 
 bool supportsUnpackRowLength = false;
+
 PFNGLTEXSTORAGE2DPROC glTexStorage2D = nullptr;
-std::mutex videoStatesMutex;
-std::unordered_map<int, std::shared_ptr<VideoState>> videoStates;
-int nextVideoHandle = 1;
-int mediaFoundationInitCount = 0;
+
+extern "C" unsigned int video_gl_get_texture_id_y()
+{
+	return static_cast<unsigned int>(yTextureID);
+}
+
+extern "C" unsigned int video_gl_get_texture_id_uv()
+{
+	return static_cast<unsigned int>(uvTextureID);
+}
 
 std::wstring widen(const char *utf8)
 {
@@ -94,268 +92,8 @@ std::wstring widen(const char *utf8)
 	return wstr;
 }
 
-void detectGLCapabilities()
+extern "C" int video_get_width(const char *path)
 {
-	supportsUnpackRowLength = false;
-
-	const char *glVersion = (const char *)glGetString(GL_VERSION);
-	const char *glExtensions = (const char *)glGetString(GL_EXTENSIONS);
-
-	if (glVersion == nullptr)
-	{
-		return;
-	}
-
-	if (glExtensions != nullptr && strstr(glExtensions, "GL_UNPACK_ROW_LENGTH") != nullptr)
-	{
-		supportsUnpackRowLength = true;
-		return;
-	}
-
-	if (atof(glVersion) >= 3.0)
-	{
-		supportsUnpackRowLength = true;
-	}
-}
-
-void loadOpenGLExtensions()
-{
-	glTexStorage2D = (PFNGLTEXSTORAGE2DPROC)wglGetProcAddress("glTexStorage2D");
-
-	if (!glTexStorage2D)
-	{
-		printf("Warning: glTexStorage2D not available. Falling back to glTexImage2D.\n");
-	}
-}
-
-static std::shared_ptr<VideoState> getVideoState(int handle)
-{
-	std::lock_guard<std::mutex> lock(videoStatesMutex);
-	auto it = videoStates.find(handle);
-	if (it == videoStates.end())
-	{
-		return nullptr;
-	}
-
-	return it->second;
-}
-
-static bool retainMediaFoundation()
-{
-	std::lock_guard<std::mutex> lock(videoStatesMutex);
-
-	if (mediaFoundationInitCount == 0)
-	{
-		if (FAILED(MFStartup(MF_VERSION)))
-		{
-			return false;
-		}
-	}
-
-	mediaFoundationInitCount++;
-	return true;
-}
-
-static void releaseMediaFoundation()
-{
-	bool shouldShutdown = false;
-
-	{
-		std::lock_guard<std::mutex> lock(videoStatesMutex);
-
-		if (mediaFoundationInitCount > 0)
-		{
-			mediaFoundationInitCount--;
-			shouldShutdown = (mediaFoundationInitCount == 0);
-		}
-	}
-
-	if (shouldShutdown)
-	{
-		MFShutdown();
-	}
-}
-
-static void releaseReader(VideoState &state)
-{
-	if (state.reader)
-	{
-		state.reader->Release();
-		state.reader = nullptr;
-	}
-}
-
-static void releaseTextures(VideoState &state)
-{
-	if (state.yTextureID != 0)
-	{
-		glDeleteTextures(1, &state.yTextureID);
-		state.yTextureID = 0;
-	}
-
-	if (state.uvTextureID != 0)
-	{
-		glDeleteTextures(1, &state.uvTextureID);
-		state.uvTextureID = 0;
-	}
-}
-
-static void resetState(VideoState &state)
-{
-	state.pixelBuffer = nullptr;
-	state.audioLeftover.clear();
-	state.packedYPlane.clear();
-	state.packedUVPlane.clear();
-	state.frameWidth = 0;
-	state.frameHeight = 0;
-	state.currentAudioPosition = 0;
-	state.currentVideoPosition = 0;
-}
-
-void initVideoTextures(VideoState &state, int width, int height)
-{
-	bool resized = ((state.yTextureID != 0 || state.uvTextureID != 0)
-		&& (state.frameWidth != width || state.frameHeight != height));
-	if (resized)
-	{
-		releaseTextures(state);
-	}
-
-	state.frameWidth = width;
-	state.frameHeight = height;
-
-	int uvWidth = width / 2;
-	int uvHeight = height / 2;
-
-	if (state.yTextureID == 0)
-	{
-		glGenTextures(1, &state.yTextureID);
-		glBindTexture(GL_TEXTURE_2D, state.yTextureID);
-		GLint swizzle[] = {GL_RED, GL_RED, GL_RED, GL_ONE};
-		glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzle);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-		if (glTexStorage2D)
-		{
-			glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8, width, height);
-		}
-		else
-		{
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
-		}
-	}
-
-	if (state.uvTextureID == 0)
-	{
-		glGenTextures(1, &state.uvTextureID);
-		glBindTexture(GL_TEXTURE_2D, state.uvTextureID);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-		if (glTexStorage2D)
-		{
-			glTexStorage2D(GL_TEXTURE_2D, 1, GL_RG8, uvWidth, uvHeight);
-		}
-		else
-		{
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RG, uvWidth, uvHeight, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
-		}
-	}
-}
-
-extern "C" int video_create()
-{
-	loadOpenGLExtensions();
-	detectGLCapabilities();
-
-	if (!retainMediaFoundation())
-	{
-		return 0;
-	}
-
-	auto state = std::make_shared<VideoState>();
-	int handle = 0;
-
-	{
-		std::lock_guard<std::mutex> lock(videoStatesMutex);
-
-		int attempts = 0;
-		while (attempts < 0x7FFFFFFF)
-		{
-			int candidate = nextVideoHandle++;
-			if (nextVideoHandle <= 0)
-			{
-				nextVideoHandle = 1;
-			}
-
-			if (candidate > 0 && videoStates.find(candidate) == videoStates.end())
-			{
-				videoStates[candidate] = state;
-				handle = candidate;
-				break;
-			}
-
-			attempts++;
-		}
-	}
-
-	if (handle == 0)
-	{
-		releaseMediaFoundation();
-	}
-
-	return handle;
-}
-
-extern "C" bool video_init()
-{
-	loadOpenGLExtensions();
-	detectGLCapabilities();
-	if (!retainMediaFoundation())
-	{
-		return false;
-	}
-
-	releaseMediaFoundation();
-	return true;
-}
-
-extern "C" unsigned int video_gl_get_texture_id_y(int handle)
-{
-	auto state = getVideoState(handle);
-	if (!state)
-	{
-		return 0;
-	}
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	return static_cast<unsigned int>(state->yTextureID);
-}
-
-extern "C" unsigned int video_gl_get_texture_id_uv(int handle)
-{
-	auto state = getVideoState(handle);
-	if (!state)
-	{
-		return 0;
-	}
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	return static_cast<unsigned int>(state->uvTextureID);
-}
-
-extern "C" int video_get_width(int handle, const char *path)
-{
-	if (!getVideoState(handle))
-	{
-		return -1;
-	}
-
 	IMFSourceReader *probeReader = nullptr;
 	auto widePath = widen(path);
 	HRESULT hr = MFCreateSourceReaderFromURL(widePath.c_str(), nullptr, &probeReader);
@@ -378,13 +116,8 @@ extern "C" int video_get_width(int handle, const char *path)
 	return SUCCEEDED(hr) ? static_cast<int>(w) : -1;
 }
 
-extern "C" int video_get_height(int handle, const char *path)
+extern "C" int video_get_height(const char *path)
 {
-	if (!getVideoState(handle))
-	{
-		return -1;
-	}
-
 	IMFSourceReader *probeReader = nullptr;
 	auto widePath = widen(path);
 	HRESULT hr = MFCreateSourceReaderFromURL(widePath.c_str(), nullptr, &probeReader);
@@ -407,123 +140,138 @@ extern "C" int video_get_height(int handle, const char *path)
 	return SUCCEEDED(hr) ? static_cast<int>(h) : -1;
 }
 
-extern "C" bool video_gl_load(int handle, const char *path)
+void detectGLCapabilities()
 {
-	auto state = getVideoState(handle);
-	if (!state)
+	const char* glVersion = (const char*)glGetString(GL_VERSION);
+	const char* glExtensions = (const char*)glGetString(GL_EXTENSIONS);
+
+	if (strstr(glExtensions, "GL_UNPACK_ROW_LENGTH") != nullptr || atof(glVersion) >= 3.0)
 	{
-		return false;
+		supportsUnpackRowLength = true;
+	}
+}
+
+void loadOpenGLExtensions()
+{
+    glTexStorage2D = (PFNGLTEXSTORAGE2DPROC)wglGetProcAddress("glTexStorage2D");
+
+    if (!glTexStorage2D)
+    {
+        printf("Warning: glTexStorage2D not available. Falling back to glTexImage2D.\n");
+    }
+}
+
+extern "C" bool video_init()
+{
+	loadOpenGLExtensions();
+	detectGLCapabilities();
+	return SUCCEEDED(MFStartup(MF_VERSION));
+}
+
+void initVideoTextures(int width, int height)
+{
+	frameWidth = width;
+	frameHeight = height;
+
+	int uvWidth = width / 2;
+	int uvHeight = height / 2;
+
+	if (yTextureID == 0)
+	{
+		glGenTextures(1, &yTextureID);
+		glBindTexture(GL_TEXTURE_2D, yTextureID);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+		if (glTexStorage2D)
+		{
+			glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8, width, height);
+		}
+		else
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+		}
 	}
 
-	std::lock_guard<std::mutex> lock(state->mutex);
-	state->audioLeftover.clear();
+	if (uvTextureID == 0)
+	{
+		glGenTextures(1, &uvTextureID);
+		glBindTexture(GL_TEXTURE_2D, uvTextureID);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-	IMFSourceReader *newReader = nullptr;
-	IMFMediaType *type = nullptr;
-	IMFMediaType *actualType = nullptr;
-	IMFMediaType *audioType = nullptr;
-	UINT32 w = 0, h = 0;
-	bool success = false;
+		if (glTexStorage2D)
+		{
+			glTexStorage2D(GL_TEXTURE_2D, 1, GL_RG8, uvWidth, uvHeight); // Immutable UV
+		}
+		else
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RG, uvWidth, uvHeight, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
+		}
+	}
+}
 
+extern "C" bool video_gl_load(const char *path)
+{
 	auto widePath = widen(path);
-	HRESULT hr = MFCreateSourceReaderFromURL(widePath.c_str(), nullptr, &newReader);
+	HRESULT hr = MFCreateSourceReaderFromURL(widePath.c_str(), nullptr, &reader);
 	if (FAILED(hr))
-	{
-		goto cleanup;
-	}
+		return false;
 
+	IMFMediaType *type = nullptr;
 	hr = MFCreateMediaType(&type);
 	if (FAILED(hr))
-	{
-		goto cleanup;
-	}
+		return false;
 
 	type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
 	type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-	hr = newReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
+	hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
+	type->Release();
 	if (FAILED(hr))
-	{
-		goto cleanup;
-	}
+		return false;
 
-	hr = newReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actualType);
+	IMFMediaType *actualType = nullptr;
+	hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actualType);
 	if (FAILED(hr))
-	{
-		goto cleanup;
-	}
+		return false;
 
+	UINT32 w = 0, h = 0;
 	hr = MFGetAttributeSize(actualType, MF_MT_FRAME_SIZE, &w, &h);
+	actualType->Release();
 	if (FAILED(hr))
-	{
-		goto cleanup;
-	}
+		return false;
 
-	initVideoTextures(*state, static_cast<int>(w), static_cast<int>(h));
+	frameWidth = static_cast<int>(w);
+	frameHeight = static_cast<int>(h);
 
+	initVideoTextures(frameWidth, frameHeight);
+
+	IMFMediaType *audioType = nullptr;
 	hr = MFCreateMediaType(&audioType);
-	if (FAILED(hr))
+	if (SUCCEEDED(hr))
 	{
-		goto cleanup;
-	}
-
-	audioType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-	audioType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-	hr = newReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, audioType);
-	if (FAILED(hr))
-	{
-		goto cleanup;
-	}
-
-	success = true;
-
-cleanup:
-	if (audioType)
-	{
+		audioType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+		audioType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+		hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, audioType);
 		audioType->Release();
-		audioType = nullptr;
 	}
-	if (actualType)
+	else
 	{
-		actualType->Release();
-		actualType = nullptr;
-	}
-	if (type)
-	{
-		type->Release();
-		type = nullptr;
-	}
-
-	if (!success)
-	{
-		if (newReader)
-		{
-			newReader->Release();
-		}
 		return false;
 	}
 
-	releaseReader(*state);
-	state->reader = newReader;
-	state->pixelBuffer = nullptr;
-	state->currentAudioPosition = 0;
-	state->currentVideoPosition = 0;
 	return true;
 }
 
-extern "C" bool video_software_load(int handle, const char *path, unsigned char *externalBuffer, int bufferSize)
+extern "C" bool video_software_load(const char *path, unsigned char *externalBuffer, int bufferSize)
 {
-	auto state = getVideoState(handle);
-	if (!state)
-	{
-		return false;
-	}
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	state->audioLeftover.clear();
-
 	auto widePath = widen(path);
-	IMFSourceReader *newReader = nullptr;
-	HRESULT hr = MFCreateSourceReaderFromURL(widePath.c_str(), nullptr, &newReader);
+	HRESULT hr = MFCreateSourceReaderFromURL(widePath.c_str(), nullptr, &reader);
+	// printf("MFCreateSourceReaderFromURL HRESULT: 0x%x\n", hr);
 	if (FAILED(hr))
 		return false;
 
@@ -531,26 +279,30 @@ extern "C" bool video_software_load(int handle, const char *path, unsigned char 
 	hr = MFCreateMediaType(&type);
 	if (FAILED(hr))
 	{
-		newReader->Release();
+		reader->Release();
+		reader = nullptr;
 		return false;
 	}
 
 	type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+	type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12); // <-- Use NV12 here
 
-	hr = newReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
+	hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
 	type->Release();
+	// printf("SetCurrentMediaType (NV12) HRESULT: 0x%x\n", hr);
 	if (FAILED(hr))
 	{
-		newReader->Release();
+		reader->Release();
+		reader = nullptr;
 		return false;
 	}
 
 	IMFMediaType *actualType = nullptr;
-	hr = newReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actualType);
+	hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actualType);
 	if (FAILED(hr))
 	{
-		newReader->Release();
+		reader->Release();
+		reader = nullptr;
 		return false;
 	}
 
@@ -559,8 +311,9 @@ extern "C" bool video_software_load(int handle, const char *path, unsigned char 
 	if (SUCCEEDED(hr))
 	{
 		audioType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-		audioType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-		hr = newReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, audioType);
+		audioType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM); 
+
+		hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, audioType);
 		audioType->Release();
 	}
 
@@ -569,46 +322,39 @@ extern "C" bool video_software_load(int handle, const char *path, unsigned char 
 	actualType->Release();
 	if (FAILED(hr) || w == 0 || h == 0)
 	{
-		newReader->Release();
+		reader->Release();
+		reader = nullptr;
 		return false;
 	}
 
-	int frameWidth = static_cast<int>(w);
-	int frameHeight = static_cast<int>(h);
-	int requiredSize = frameWidth * frameHeight * 3 / 2;
+	frameWidth = static_cast<int>(w);
+	frameHeight = static_cast<int>(h);
+
+	int requiredSize = frameWidth * frameHeight * 1.5;
 	if (bufferSize < requiredSize)
 	{
-		newReader->Release();
+		reader->Release();
+		reader = nullptr;
 		return false;
 	}
 
-	releaseReader(*state);
-	state->reader = newReader;
-	state->frameWidth = frameWidth;
-	state->frameHeight = frameHeight;
-	state->pixelBuffer = externalBuffer;
-	state->currentAudioPosition = 0;
-	state->currentVideoPosition = 0;
+	pixelBuffer = externalBuffer;
 
 	return true;
 }
 
-extern "C" bool video_software_update_frame(int handle)
+extern "C" bool video_software_update_frame()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return false;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader || !state->pixelBuffer)
+	if (!reader || !pixelBuffer)
 		return false;
 
 	IMFSample *sample = nullptr;
 	DWORD flags = 0;
-	HRESULT hr = state->reader->ReadSample(
+	HRESULT hr = reader->ReadSample(
 		MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 		0, nullptr, &flags, nullptr, &sample);
 
+	// printf("ReadSample HRESULT: 0x%x, flags: 0x%x\n", hr, flags);
 	if (FAILED(hr))
 		return false;
 	if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
@@ -620,11 +366,9 @@ extern "C" bool video_software_update_frame(int handle)
 
 	if (!sample)
 	{
+		// printf("No sample returned.\n");
 		return false;
 	}
-
-	LONGLONG timestamp = 0;
-	bool hasTimestamp = SUCCEEDED(sample->GetSampleTime(&timestamp));
 
 	IMFMediaBuffer *buffer = nullptr;
 	hr = sample->ConvertToContiguousBuffer(&buffer);
@@ -632,28 +376,35 @@ extern "C" bool video_software_update_frame(int handle)
 
 	if (FAILED(hr) || !buffer)
 	{
+		// printf("ConvertToContiguousBuffer failed: 0x%x\n", hr);
 		return false;
 	}
 
 	BYTE *data = nullptr;
 	DWORD length = 0;
 	hr = buffer->Lock(&data, nullptr, &length);
+	// printf("Buffer Lock HRESULT: 0x%x, length: %u\n", hr, length);
 
-	int requiredSize = state->frameWidth * state->frameHeight * 3 / 2;
+	int requiredSize = frameWidth * frameHeight * 1.5; // NV12 size
 
-	if (SUCCEEDED(hr) && length >= (DWORD)requiredSize)
+	if (SUCCEEDED(hr) && length >= requiredSize)
 	{
-		memcpy(state->pixelBuffer, data, requiredSize);
+		memcpy(pixelBuffer, data, requiredSize);
+
+		// printf("Successfully copied %d bytes to pixelBuffer.\n", requiredSize);
 	}
 	else
 	{
+		// printf("Buffer size mismatch. Required: %d, Actual: %u\n", requiredSize, length);
 		buffer->Unlock();
 		buffer->Release();
 		return false;
 	}
 
-	if (hasTimestamp)
-		state->currentVideoPosition = timestamp;
+	LONGLONG timestamp = 0;
+	hr = sample->GetSampleTime(&timestamp);
+	if (SUCCEEDED(hr))
+		currentVideoPosition = timestamp;
 
 	buffer->Unlock();
 	buffer->Release();
@@ -661,216 +412,163 @@ extern "C" bool video_software_update_frame(int handle)
 	return true;
 }
 
-extern "C" bool video_gl_update_frame(int handle)
+extern "C" bool video_gl_update_frame()
 {
-	auto state = getVideoState(handle);
-	if (!state)
+	if (!reader)
 		return false;
 
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
-		return false;
-
-	IMFSample *sample = nullptr;
+	IMFSample* sample = nullptr;
 	DWORD flags = 0;
 
-	HRESULT hr = state->reader->ReadSample(
+	HRESULT hr = reader->ReadSample(
 		MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 		0, nullptr, &flags, nullptr, &sample);
 
 	if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM) || !sample)
 	{
-		if (sample)
-			sample->Release();
+		if (sample) sample->Release();
 		return false;
 	}
 
-	LONGLONG timestamp = 0;
-	bool hasTimestamp = SUCCEEDED(sample->GetSampleTime(&timestamp));
-
-	IMFMediaBuffer *buffer = nullptr;
+	IMFMediaBuffer* buffer = nullptr;
 	hr = sample->ConvertToContiguousBuffer(&buffer);
 	sample->Release();
 	if (FAILED(hr) || !buffer)
 		return false;
 
-	BYTE *data = nullptr;
-	DWORD length = 0;
-	hr = buffer->Lock(&data, nullptr, &length);
-	if (FAILED(hr) || !data)
+	IMF2DBuffer* buffer2D = nullptr;
+	hr = buffer->QueryInterface(IID_PPV_ARGS(&buffer2D));
+	if (FAILED(hr) || !buffer2D)
 	{
 		buffer->Release();
 		return false;
 	}
 
-	int uvWidth = state->frameWidth / 2;
-	int uvHeight = state->frameHeight / 2;
-	int frameSize = state->frameWidth * state->frameHeight;
-	int requiredSize = frameSize + (frameSize / 2);
-	if ((int)length < requiredSize || state->frameWidth <= 0 || state->frameHeight <= 0 || uvWidth <= 0 || uvHeight <= 0)
+	BYTE* scanline0 = nullptr;
+	LONG stride = 0;
+	hr = buffer2D->Lock2D(&scanline0, &stride);
+	if (FAILED(hr))
 	{
-		buffer->Unlock();
+		buffer2D->Release();
 		buffer->Release();
 		return false;
 	}
 
-	int strideBytes = state->frameWidth;
-	int rowCount = state->frameHeight + uvHeight;
-	if (rowCount > 0)
+	int uvWidth = frameWidth / 2;
+	int uvHeight = frameHeight / 2;
+	int paddedHeight = (frameHeight + 15) & ~15;
+	BYTE* uvPlane = scanline0 + stride * paddedHeight;
+
+	bool success = false;
+
+	if (supportsUnpackRowLength)
 	{
-		int inferredStride = (int)length / rowCount;
-		if (inferredStride >= state->frameWidth)
-		{
-			strideBytes = inferredStride;
-		}
-	}
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, stride);
+		glBindTexture(GL_TEXTURE_2D, yTextureID);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frameWidth, frameHeight, GL_RED, GL_UNSIGNED_BYTE, scanline0);
 
-	int requiredStrideBytes = strideBytes * rowCount;
-	if (strideBytes < state->frameWidth || (int)length < requiredStrideBytes)
-	{
-		buffer->Unlock();
-		buffer->Release();
-		return false;
-	}
-
-	BYTE *yPlane = data;
-	BYTE *uvPlane = data + (strideBytes * state->frameHeight);
-
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-	if (strideBytes == state->frameWidth)
-	{
-		glBindTexture(GL_TEXTURE_2D, state->yTextureID);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->frameWidth, state->frameHeight, GL_RED, GL_UNSIGNED_BYTE, yPlane);
-		glBindTexture(GL_TEXTURE_2D, state->uvTextureID);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / 2);
+		glBindTexture(GL_TEXTURE_2D, uvTextureID);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, GL_RG, GL_UNSIGNED_BYTE, uvPlane);
-	}
-	else if (supportsUnpackRowLength)
-	{
-		glBindTexture(GL_TEXTURE_2D, state->yTextureID);
-		glPixelStorei(GL_UNPACK_ROW_LENGTH, strideBytes);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->frameWidth, state->frameHeight, GL_RED, GL_UNSIGNED_BYTE, yPlane);
 
-		glBindTexture(GL_TEXTURE_2D, state->uvTextureID);
-		glPixelStorei(GL_UNPACK_ROW_LENGTH, strideBytes / 2);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, GL_RG, GL_UNSIGNED_BYTE, uvPlane);
 		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+		success = true;
 	}
 	else
 	{
-		state->packedYPlane.resize(state->frameWidth * state->frameHeight);
-		state->packedUVPlane.resize(state->frameWidth * uvHeight);
+		static std::vector<BYTE> tightY;
+		static std::vector<BYTE> tightUV;
 
-		for (int y = 0; y < state->frameHeight; ++y)
+		tightY.resize(frameWidth * frameHeight);
+		tightUV.resize(uvWidth * uvHeight * 2);
+
+		for (int row = 0; row < frameHeight; row++)
 		{
-			memcpy(state->packedYPlane.data() + (y * state->frameWidth), yPlane + (y * strideBytes), state->frameWidth);
+			BYTE* src = scanline0 + row * stride;
+			BYTE* dst = &tightY[row * frameWidth];
+			memcpy(dst, src, frameWidth);
 		}
 
-		for (int y = 0; y < uvHeight; ++y)
+		for (int row = 0; row < uvHeight; row++)
 		{
-			memcpy(state->packedUVPlane.data() + (y * state->frameWidth), uvPlane + (y * strideBytes), state->frameWidth);
+			BYTE* src = uvPlane + row * stride;
+			BYTE* dst = &tightUV[row * uvWidth * 2];
+			memcpy(dst, src, uvWidth * 2);
 		}
 
-		glBindTexture(GL_TEXTURE_2D, state->yTextureID);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->frameWidth, state->frameHeight, GL_RED, GL_UNSIGNED_BYTE, state->packedYPlane.data());
-		glBindTexture(GL_TEXTURE_2D, state->uvTextureID);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, GL_RG, GL_UNSIGNED_BYTE, state->packedUVPlane.data());
+		glBindTexture(GL_TEXTURE_2D, yTextureID);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frameWidth, frameHeight, GL_RED, GL_UNSIGNED_BYTE, tightY.data());
+
+		glBindTexture(GL_TEXTURE_2D, uvTextureID);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, GL_RG, GL_UNSIGNED_BYTE, tightUV.data());
+
+		success = true;
 	}
 
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	LONGLONG timestamp = 0;
+	if (SUCCEEDED(sample->GetSampleTime(&timestamp)))
+		currentVideoPosition = timestamp;
 
-	if (hasTimestamp)
-		state->currentVideoPosition = timestamp;
-
-	buffer->Unlock();
+	buffer2D->Unlock2D();
+	buffer2D->Release();
 	buffer->Release();
 
-	return true;
+	return success;
 }
 
-extern "C" unsigned char *video_get_frame_pixels(int handle, int *width, int *height)
+extern "C" unsigned char *video_get_frame_pixels(int *width, int *height)
 {
-	auto state = getVideoState(handle);
-	if (!state)
-	{
-		return nullptr;
-	}
-
-	std::lock_guard<std::mutex> lock(state->mutex);
 	if (width)
-		*width = state->frameWidth;
+		*width = frameWidth;
 	if (height)
-		*height = state->frameHeight;
-	return state->pixelBuffer;
+		*height = frameHeight;
+	return pixelBuffer;
 }
 
-extern "C" int video_get_frame_width(int handle)
+extern "C" void video_shutdown()
 {
-	auto state = getVideoState(handle);
-	if (!state)
+	pixelBuffer = nullptr;
+
+	if (reader)
 	{
-		return 0;
+		reader->Release();
+		reader = nullptr;
 	}
 
-	std::lock_guard<std::mutex> lock(state->mutex);
-	return state->frameWidth;
+	if (yTextureID != 0)
+	{
+		glDeleteTextures(1, &yTextureID);
+		yTextureID = 0;
+	}
+
+	if (uvTextureID != 0)
+	{
+		glDeleteTextures(1, &uvTextureID);
+		uvTextureID = 0;
+	}
+
+	frameWidth = 0;
+	frameHeight = 0;
+	currentAudioPosition = 0;
+	currentVideoPosition = 0;
+
+	MFShutdown();
 }
 
-extern "C" int video_get_frame_height(int handle)
+int video_get_audio_samples(unsigned char *outBuffer, int bytesLength)
 {
-	auto state = getVideoState(handle);
-	if (!state)
-	{
-		return 0;
-	}
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	return state->frameHeight;
-}
-
-extern "C" void video_shutdown(int handle)
-{
-	std::shared_ptr<VideoState> state;
-
-	{
-		std::lock_guard<std::mutex> lock(videoStatesMutex);
-		auto it = videoStates.find(handle);
-		if (it == videoStates.end())
-		{
-			return;
-		}
-
-		state = it->second;
-		videoStates.erase(it);
-	}
-
-	{
-		std::lock_guard<std::mutex> lock(state->mutex);
-		releaseReader(*state);
-		releaseTextures(*state);
-		resetState(*state);
-	}
-
-	releaseMediaFoundation();
-}
-
-extern "C" int video_get_audio_samples(int handle, unsigned char *outBuffer, int bytesLength)
-{
-	auto state = getVideoState(handle);
-	if (!state)
+	if (!reader)
 		return -1;
 
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
-		return -1;
+	static std::vector<uint8_t> leftover;
 	int totalCopied = 0;
 
-	while (totalCopied < bytesLength && !state->audioLeftover.empty())
+	while (totalCopied < bytesLength && !leftover.empty())
 	{
-		int toCopy = std::min((int)state->audioLeftover.size(), bytesLength - totalCopied);
-		memcpy(outBuffer + totalCopied, state->audioLeftover.data(), toCopy);
+		int toCopy = std::min((int)leftover.size(), bytesLength - totalCopied);
+		memcpy(outBuffer + totalCopied, leftover.data(), toCopy);
 		totalCopied += toCopy;
-		state->audioLeftover.erase(state->audioLeftover.begin(), state->audioLeftover.begin() + toCopy);
+		leftover.erase(leftover.begin(), leftover.begin() + toCopy);
 	}
 
 	while (totalCopied < bytesLength)
@@ -878,7 +576,7 @@ extern "C" int video_get_audio_samples(int handle, unsigned char *outBuffer, int
 		IMFSample *sample = nullptr;
 		DWORD flags = 0;
 
-		HRESULT hr = state->reader->ReadSample(
+		HRESULT hr = reader->ReadSample(
 			MF_SOURCE_READER_FIRST_AUDIO_STREAM,
 			0, nullptr, &flags, nullptr, &sample);
 
@@ -895,7 +593,7 @@ extern "C" int video_get_audio_samples(int handle, unsigned char *outBuffer, int
 		LONGLONG sampleTime = 0;
 		if (SUCCEEDED(sample->GetSampleTime(&sampleTime)))
 		{
-			state->currentAudioPosition = sampleTime;
+			currentAudioPosition = sampleTime;
 		}
 
 		IMFMediaBuffer *buffer = nullptr;
@@ -919,7 +617,7 @@ extern "C" int video_get_audio_samples(int handle, unsigned char *outBuffer, int
 
 		if (toCopy < (int)length)
 		{
-			state->audioLeftover.insert(state->audioLeftover.end(), data + toCopy, data + length);
+			leftover.insert(leftover.end(), data + toCopy, data + length);
 		}
 
 		buffer->Unlock();
@@ -929,18 +627,13 @@ extern "C" int video_get_audio_samples(int handle, unsigned char *outBuffer, int
 	return totalCopied;
 }
 
-extern "C" int video_get_audio_sample_rate(int handle)
+int video_get_audio_sample_rate()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
+	if (!reader)
 		return -1;
 
 	IMFMediaType *audioType = nullptr;
-	HRESULT hr = state->reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &audioType);
+	HRESULT hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &audioType);
 	if (FAILED(hr) || !audioType)
 		return -1;
 
@@ -953,18 +646,13 @@ extern "C" int video_get_audio_sample_rate(int handle)
 	return (int)sampleRate;
 }
 
-extern "C" int video_get_audio_bits_per_sample(int handle)
+extern "C" int video_get_audio_bits_per_sample()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
+	if (!reader)
 		return -1;
 
 	IMFMediaType *audioType = nullptr;
-	HRESULT hr = state->reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &audioType);
+	HRESULT hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &audioType);
 	if (FAILED(hr) || !audioType)
 		return -1;
 
@@ -975,18 +663,13 @@ extern "C" int video_get_audio_bits_per_sample(int handle)
 	return SUCCEEDED(hr) ? static_cast<int>(bits) : -1;
 }
 
-extern "C" float video_get_frame_rate(int handle)
+extern "C" float video_get_frame_rate()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1.0f;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
+	if (!reader)
 		return -1.0f;
 
 	IMFMediaType *mediaType = nullptr;
-	HRESULT hr = state->reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediaType);
+	HRESULT hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediaType);
 	if (FAILED(hr) || !mediaType)
 		return -1.0f;
 
@@ -1000,18 +683,13 @@ extern "C" float video_get_frame_rate(int handle)
 	return (float)numerator / (float)denominator;
 }
 
-extern "C" int video_get_audio_channel_count(int handle)
+extern "C" int video_get_audio_channel_count()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
+	if (!reader)
 		return -1;
 
 	IMFMediaType *mediaType = nullptr;
-	HRESULT hr = state->reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &mediaType);
+	HRESULT hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &mediaType);
 	if (FAILED(hr) || !mediaType)
 		return -1;
 
@@ -1025,18 +703,13 @@ extern "C" int video_get_audio_channel_count(int handle)
 	return (int)channels;
 }
 
-extern "C" int video_get_duration(int handle)
+extern "C" int video_get_duration()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
+	if (!reader)
 		return -1;
 
 	PROPVARIANT var;
-	HRESULT hr = state->reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var);
+	HRESULT hr = reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var);
 	if (FAILED(hr))
 		return -1;
 
@@ -1046,34 +719,19 @@ extern "C" int video_get_duration(int handle)
 	return (int)(duration100ns / 10000);
 }
 
-extern "C" int video_get_audio_position(int handle)
+extern "C" int video_get_audio_position()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	return (int)(state->currentAudioPosition / 10000);
+	return (int)(currentAudioPosition / 10000); // ms
 }
 
-extern "C" int video_get_video_position(int handle)
+extern "C" int video_get_video_position()
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return -1;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	return (int)(state->currentVideoPosition / 10000);
+	return (int)(currentVideoPosition / 10000); // ms
 }
 
-extern "C" void video_frames_seek_to(int handle, int targetMs)
+void video_frames_seek_to(int targetMs)
 {
-	auto state = getVideoState(handle);
-	if (!state)
-		return;
-
-	std::lock_guard<std::mutex> lock(state->mutex);
-	if (!state->reader)
+	if (!reader)
 		return;
 
 	LONGLONG seekTime = static_cast<LONGLONG>(targetMs) * 10000;
@@ -1083,7 +741,8 @@ extern "C" void video_frames_seek_to(int handle, int targetMs)
 	prop.vt = VT_I8;
 	prop.hVal.QuadPart = seekTime;
 
-	HRESULT hr = state->reader->SetCurrentPosition(GUID_NULL, prop);
+	// seek to nearest keyframe at or before the requested time
+	HRESULT hr = reader->SetCurrentPosition(GUID_NULL, prop);
 
 	PropVariantClear(&prop);
 
@@ -1093,10 +752,10 @@ extern "C" void video_frames_seek_to(int handle, int targetMs)
 		return;
 	}
 
-	state->currentVideoPosition = seekTime;
-	state->currentAudioPosition = seekTime;
-	state->audioLeftover.clear();
+	currentVideoPosition = seekTime;
+	currentAudioPosition = seekTime;
 }
+
 void yuv_to_rgb_pixel(unsigned char y, unsigned char u, unsigned char v, unsigned char &r, unsigned char &g, unsigned char &b)
 {
 	int c = y - 16;

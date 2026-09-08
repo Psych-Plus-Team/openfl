@@ -31,6 +31,17 @@ class BitmapFilterShader extends Shader
 		uniform sampler2D openfl_Texture;
 		uniform vec2 openfl_TextureSize;")
 	@:glFragmentBody("gl_FragColor = texture2D (openfl_Texture, openfl_TextureCoordv);")
+	#if emscripten
+	@:glFragmentSource("#pragma header
+
+		void main(void) {
+
+			#pragma body
+
+			gl_FragColor = gl_FragColor.bgra;
+
+		}")
+	#else
 	@:glFragmentSource("#pragma header
 
 		void main(void) {
@@ -38,6 +49,7 @@ class BitmapFilterShader extends Shader
 			#pragma body
 
 		}")
+	#end
 	public function new(code:ByteArray = null)
 	{
 		super(code);

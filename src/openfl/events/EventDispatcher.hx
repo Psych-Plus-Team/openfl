@@ -496,7 +496,7 @@ class EventDispatcher implements IEventDispatcher
 			iterator.reset(list);
 		}
 
-		return !event.__preventDefault;
+		return !event.isDefaultPrevented();
 	}
 
 	@:noCompletion private function __removeAllListeners():Void

@@ -81,6 +81,17 @@ class GraphicsShader extends Shader
 			gl_FragColor = color * openfl_Alphav;
 
 		}")
+	#if emscripten
+	@:glFragmentSource("#pragma header
+
+		void main(void) {
+
+			#pragma body
+
+			gl_FragColor = gl_FragColor.bgra;
+
+		}")
+	#else
 	@:glFragmentSource("#pragma header
 
 		void main(void) {
@@ -88,6 +99,7 @@ class GraphicsShader extends Shader
 			#pragma body
 
 		}")
+	#end
 	public function new(code:ByteArray = null)
 	{
 		super(code);

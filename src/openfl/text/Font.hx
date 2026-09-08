@@ -4,7 +4,6 @@ package openfl.text;
 import openfl.utils.Assets;
 import openfl.utils.ByteArray;
 import openfl.utils.Future;
-import openfl.text._internal.TextEngine;
 #if lime
 import lime.text.Font as LimeFont;
 #end
@@ -21,7 +20,6 @@ import lime.text.Font as LimeFont;
 @:fileXml('tags="haxe,release"')
 @:noDebug
 #end
-@:access(openfl.text._internal.TextEngine)
 class Font #if lime extends LimeFont #end
 {
 	/**
@@ -79,24 +77,13 @@ class Font #if lime extends LimeFont #end
 	public static function enumerateFonts(enumerateDeviceFonts:Bool = false):Array<Font>
 	{
 		#if (lime && native)
-		TextEngine.initializeDefaultFonts();
 		if (enumerateDeviceFonts)
 		{
 			var _allFonts = __registeredFonts.copy();
-			if (sys.FileSystem.exists(lime.system.System.fontsDirectory))
+			var files = sys.FileSystem.readDirectory(lime.system.System.fontsDirectory);
+			for (file in files)
 			{
-				var files = sys.FileSystem.readDirectory(lime.system.System.fontsDirectory);
-				for (file in files)
-				{
-					if (file.toLowerCase().indexOf('.ttf') != -1)
-					{
-						var font = fromFile(lime.system.System.fontsDirectory + file);
-						if (font != null)
-						{
-							_allFonts.push(font);
-						}
-					}
-				}
+				if (file.toLowerCase().indexOf('.ttf') != -1) _allFonts.push(fromFile(lime.system.System.fontsDirectory + file));
 			}
 
 			// Automatically installed fonts are stored per user basis in an alternative location found
@@ -106,17 +93,10 @@ class Font #if lime extends LimeFont #end
 			var alternateFontsDirectory = '${Sys.getEnv("LocalAppData")}\\Microsoft\\Windows\\Fonts';
 			if (sys.FileSystem.exists(alternateFontsDirectory))
 			{
-				var files = sys.FileSystem.readDirectory(alternateFontsDirectory);
+				files = sys.FileSystem.readDirectory(alternateFontsDirectory);
 				for (file in files)
 				{
-					if (file.toLowerCase().indexOf('.ttf') != -1)
-					{
-						var font = fromFile(alternateFontsDirectory + "\\" + file);
-						if (font != null)
-						{
-							_allFonts.push(font);
-						}
-					}
+					if (file.toLowerCase().indexOf('.ttf') != -1) _allFonts.push(fromFile(alternateFontsDirectory + file));
 				}
 			}
 			#end

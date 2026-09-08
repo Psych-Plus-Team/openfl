@@ -36,7 +36,14 @@ import js.html.DivElement;
 
 /**
 	The TextField class is used to create display objects for text display and
-	input.
+	input. <ph outputclass="flexonly">You can use the TextField class to
+	perform low-level text rendering. However, in Flex, you typically use the
+	Label, Text, TextArea, and TextInput controls to process text. <ph
+	outputclass="flashonly">You can give a text field an instance name in the
+	Property inspector and use the methods and properties of the TextField
+	class to manipulate it with Haxe code. TextField instance names are
+	displayed in the Movie Explorer and in the Insert Target Path dialog box in
+	the Actions panel.
 
 	To create a text field dynamically, use the `TextField()`
 	constructor.
@@ -452,7 +459,8 @@ class TextField extends InteractiveObject
 		enter only characters in the string into the text field. The string is
 		scanned from left to right. You can specify a range by using the hyphen
 		(-) character. Only user interaction is restricted; a script can put any
-		text into the text field.
+		text into the text field. <ph outputclass="flashonly">This property does
+		not synchronize with the Embed font options in the Property inspector.
 
 		If the string begins with a caret(^) character, all characters are
 		initially accepted and succeeding characters in the string are excluded
@@ -2836,7 +2844,11 @@ class TextField extends InteractiveObject
 
 	@:noCompletion private function get_htmlText():String
 	{
+		// #if (js && html5)
 		return __isHTML ? __htmlText : __text;
+		// #else
+		// return __text;
+		// #end
 	}
 
 	@:noCompletion private function set_htmlText(value:String):String
@@ -3381,7 +3393,7 @@ class TextField extends InteractiveObject
 
 		stage.removeEventListener(Event.ENTER_FRAME, this_onEnterFrame);
 		stage.removeEventListener(MouseEvent.MOUSE_MOVE, stage_onMouseMove);
-		stage.removeEventListener(MouseEvent.MOUSE_UP, stage_onMouseUp, true);
+		stage.removeEventListener(MouseEvent.MOUSE_UP, stage_onMouseUp);
 
 		if (this.stage != stage) return;
 
@@ -3528,11 +3540,7 @@ class TextField extends InteractiveObject
 		stage.addEventListener(Event.ENTER_FRAME, this_onEnterFrame);
 		#end
 		stage.addEventListener(MouseEvent.MOUSE_MOVE, stage_onMouseMove);
-		// use capture phase so that other mouseUp listeners may call
-		// stopImmediatePropagation() without affecting this listener.
-		// prevents an issue where the selection continues to follow mouseMove
-		// events after mouseUp.
-		stage.addEventListener(MouseEvent.MOUSE_UP, stage_onMouseUp, true);
+		stage.addEventListener(MouseEvent.MOUSE_UP, stage_onMouseUp);
 	}
 
 	@:noCompletion private function this_onMouseWheel(event:MouseEvent):Void
@@ -3547,15 +3555,7 @@ class TextField extends InteractiveObject
 	@:noCompletion private function window_onKeyDown(key:KeyCode, modifier:KeyModifier):Void
 	{
 		inline function isModifierPressed()
-		{
-			#if (mac || ios || tvos)
-			return modifier.metaKey;
-			#elseif js
-			return modifier.metaKey || modifier.ctrlKey;
-			#else
-			return modifier.ctrlKey && !modifier.altKey;
-			#end
-		}
+			return #if mac modifier.metaKey #elseif js(modifier.metaKey || modifier.ctrlKey) #else (modifier.ctrlKey && !modifier.altKey) #end;
 
 		switch (key)
 		{
@@ -3747,18 +3747,17 @@ class TextField extends InteractiveObject
 			#if !js
 			case V:
 				#if lime
-				if (isModifierPressed())
+				if (#if mac modifier.metaKey #else modifier.ctrlKey && !modifier.altKey #end)
 				{
-					var clipboardText = Clipboard.text;
-					if (clipboardText != null)
+					if (Clipboard.text != null)
 					{
-						var te = new TextEvent(TextEvent.TEXT_INPUT, true, true, clipboardText);
+						var te = new TextEvent(TextEvent.TEXT_INPUT, true, true, Clipboard.text);
 
 						dispatchEvent(te);
 
 						if (!te.isDefaultPrevented())
 						{
-							__replaceSelectedText(clipboardText, true);
+							__replaceSelectedText(Clipboard.text, true);
 
 							dispatchEvent(new Event(Event.CHANGE, true));
 						}

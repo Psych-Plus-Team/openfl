@@ -29,7 +29,7 @@ import haxe.Constraints.Function;
 	retrieved. The second line constructs an instance of the same Vector type (that is,
 	a Vector whose elements are all String objects) and assigns it to `v`.
 
-	```haxe
+	```as3
 	var v:Vector<String>;
 	v = new Vector<String>();
 	```
@@ -523,8 +523,8 @@ abstract Vector<T>(IVector<T>)
 		* a function that takes two arguments of the base type (T) of the Vector and
 		returns a Number:
 
-			```haxe
-			function compare(x:T, y:T):Int {}
+			```as3
+			function compare(x:T, y:T):Number {}
 			```
 
 			The logic of the function is that, given two elements `x` and `y`, the function
@@ -2117,10 +2117,6 @@ abstract Vector<T>(VectorData<T>) from VectorData<T>
 		// a bare Array object is passed in
 
 		// return cast this.concat (cast a);
-		if (a == null)
-		{
-			return VectorData.ofArray(cast this);
-		}
 		return VectorData.ofArray(untyped #if haxe4 js.Syntax.code #else __js__ #end ("Array.prototype.concat.call")(this, a));
 	}
 
@@ -2354,13 +2350,10 @@ abstract Vector<T>(VectorData<T>) from VectorData<T>
 			unshift: { value: p.unshift },
 			get_length: { value: p.get_length },
 			set_length: { value: p.set_length },
-			fixed: { writable: true },
 		}
 		var _VectorData = function (length, fixed, array) {
 			if (array == null) array = [];
-			var result = Object.defineProperties (array, _VectorDataDescriptor);
-			construct (result, length, fixed);
-			return result;
+			return Object.defineProperties (construct (array, length, fixed), _VectorDataDescriptor);
 		}
 		_VectorDataDescriptor.constructor.value = _VectorData;
 		_VectorData.__name__ = ref.__name__;
@@ -2396,10 +2389,6 @@ abstract Vector<T>(VectorData<T>) from VectorData<T>
 
 	public function concat(?a:Vector<T>):VectorData<T>
 	{
-		if (a == null)
-		{
-			return VectorData.ofArray(cast this);
-		}
 		return VectorData.ofArray(untyped #if haxe4 js.Syntax.code #else __js__ #end ("Array.prototype.concat.call (this, a)"));
 	}
 

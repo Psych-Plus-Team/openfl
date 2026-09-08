@@ -6,6 +6,7 @@ package openfl.events;
  */
 class SQLEvent extends Event
 {
+
 	public static inline var ANALYZE:EventType<SQLEvent> = "analyze";
 	public static inline var ATTACH:EventType<SQLEvent> = "attach";
 	public static inline var BEGIN:EventType<SQLEvent> = "begin";
@@ -22,9 +23,10 @@ class SQLEvent extends Event
 	public static inline var ROLLBACK_TO_SAVEPOINT:EventType<SQLEvent> = "rollbackToSavepoint";
 	public static inline var SCHEMA:EventType<SQLEvent> = "schema";
 	public static inline var SET_SAVEPOINT:EventType<SQLEvent> = "cancel";
-
-	public function new(type:EventType<SQLEvent>)
+	
+	public function new(type:EventType<SQLEvent>) 
 	{
 		super(type);
 	}
+	
 }

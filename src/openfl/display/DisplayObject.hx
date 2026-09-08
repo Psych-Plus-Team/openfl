@@ -874,10 +874,10 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 
 	/**
 		An object with properties pertaining to a display object's matrix, color
-		transform, and pixel bounds. The specific properties — matrix,
+		transform, and pixel bounds. The specific properties  -  matrix,
 		colorTransform, and three read-only properties
 		(`concatenatedMatrix`, `concatenatedColorTransform`,
-		and `pixelBounds`) — are described in the entry for the
+		and `pixelBounds`)  -  are described in the entry for the
 		Transform class.
 
 		Each of the transform object's properties is itself an object. This
@@ -1495,7 +1495,14 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 	{
 		if (__eventMap != null && hasEventListener(event.type))
 		{
-			return super.__dispatchEvent(event);
+			var result = super.__dispatchEvent(event);
+
+			if (event.__isCanceled)
+			{
+				return true;
+			}
+
+			return result;
 		}
 
 		return true;
@@ -1506,14 +1513,13 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 	@:noCompletion private override function __dispatchEvent(event:Event):Bool
 	{
 		var parent = event.bubbles ? this.parent : null;
-		var atTargetResult = super.__dispatchEvent(event);
+		var result = super.__dispatchEvent(event);
 
 		if (event.__isCanceled)
 		{
-			return atTargetResult;
+			return true;
 		}
 
-		var bubblingResult = true;
 		if (parent != null && parent != this)
 		{
 			event.eventPhase = EventPhase.BUBBLING_PHASE;
@@ -1523,10 +1529,10 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 				event.target = this;
 			}
 
-			bubblingResult = parent.__dispatchEvent(event);
+			parent.__dispatchEvent(event);
 		}
 
-		return atTargetResult && bubblingResult;
+		return result;
 	}
 
 	@:noCompletion private function __dispatchWithCapture(event:Event):Bool
@@ -1536,14 +1542,13 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 			event.target = this;
 		}
 
-		var capturingResult = true;
 		if (parent != null)
 		{
 			event.eventPhase = CAPTURING_PHASE;
 
 			if (parent == stage)
 			{
-				capturingResult = parent.__dispatch(event);
+				parent.__dispatch(event);
 			}
 			else
 			{
@@ -1560,23 +1565,16 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 
 				for (j in 0...i)
 				{
-					capturingResult = stack[i - j - 1].__dispatch(event) && capturingResult;
+					stack[i - j - 1].__dispatch(event);
 				}
 
 				__tempStack.release(stack);
-			}
-
-			if (event.__isCanceled)
-			{
-				return capturingResult;
 			}
 		}
 
 		event.eventPhase = AT_TARGET;
 
-		var atTargetResult = __dispatchEvent(event);
-
-		return capturingResult && atTargetResult;
+		return __dispatchEvent(event);
 	}
 
 	@:noCompletion private function __enterFrame(deltaTime:Int):Void {}
@@ -2323,7 +2321,7 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 		{
 			__scaleX = value;
 
-			if (__rotation == 0)
+			if (__transform.b == 0)
 			{
 				if (value != __transform.a) __setTransformDirty();
 				__transform.a = value;
@@ -2357,7 +2355,7 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 		{
 			__scaleY = value;
 
-			if (__rotation == 0)
+			if (__transform.c == 0)
 			{
 				if (value != __transform.d) __setTransformDirty();
 				__transform.d = value;
@@ -2415,7 +2413,7 @@ class DisplayObject extends EventDispatcher implements IBitmapDrawable #if (open
 
 		__setTransformDirty();
 
-		if (__supportDOM || cacheAsBitmap)
+		if (__supportDOM)
 		{
 			__setRenderDirty();
 		}
