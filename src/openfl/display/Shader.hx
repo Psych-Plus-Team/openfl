@@ -495,8 +495,8 @@ class Shader
 				+ "#endif\n\n";
 			#end
 
-			var vertex = prefix + glVertexSource;
-			var fragment = prefix + glFragmentSource;
+			var vertex = __applyGLSourcePrefix(glVertexSource, prefix);
+			var fragment = __applyGLSourcePrefix(glFragmentSource, prefix);
 
 			var id = vertex + fragment;
 
@@ -576,11 +576,11 @@ class Shader
 
 		if (storageType == "uniform")
 		{
-			regex = ~/uniform ([A-Za-z0-9]+) ([A-Za-z0-9_]+)/;
+			regex = ~/uniform\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z0-9]+)\s+([A-Za-z0-9_]+)/;
 		}
 		else
 		{
-			regex = ~/attribute ([A-Za-z0-9]+) ([A-Za-z0-9_]+)/;
+			regex = ~/attribute\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z0-9]+)\s+([A-Za-z0-9_]+)/;
 		}
 
 		while (regex.matchSub(source, lastMatch))
@@ -608,6 +608,9 @@ class Shader
 						__texture = input;
 					case "bitmap":
 						__bitmap = input;
+					case "sampler0":
+						if (__bitmap == null)
+							__bitmap = input;
 					default:
 				}
 
@@ -913,6 +916,23 @@ class Shader
 				intIndex++;
 			}
 		}
+	}
+
+	@:noCompletion private function __applyGLSourcePrefix(source:String, prefix:String):String
+	{
+		if (source == null || prefix == null || prefix.length == 0)
+			return source;
+
+		var trimmed:String = StringTools.ltrim(source);
+		if (!StringTools.startsWith(trimmed, "#version"))
+			return prefix + source;
+
+		var leadingLength:Int = source.length - trimmed.length;
+		var newline:Int = source.indexOf("\n", leadingLength);
+		if (newline == -1)
+			return source + "\n" + prefix;
+
+		return source.substr(0, newline + 1) + prefix + source.substr(newline + 1);
 	}
 
 	// Get & Set Methods
