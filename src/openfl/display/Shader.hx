@@ -577,11 +577,11 @@ class Shader
 
 		if (storageType == "uniform")
 		{
-			regex = ~/uniform\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z0-9]+)\s+([A-Za-z0-9_]+)/;
+			regex = ~/uniform[ \t]+(?:(?:lowp|mediump|highp)[ \t]+)?([A-Za-z0-9]+)[ \t]+([A-Za-z0-9_]+)/;
 		}
 		else
 		{
-			regex = ~/attribute\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z0-9]+)\s+([A-Za-z0-9_]+)/;
+			regex = ~/attribute[ \t]+(?:(?:lowp|mediump|highp)[ \t]+)?([A-Za-z0-9]+)[ \t]+([A-Za-z0-9_]+)/;
 		}
 
 		while (regex.matchSub(source, lastMatch))

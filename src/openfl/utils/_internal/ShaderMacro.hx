@@ -208,11 +208,11 @@ class ShaderMacro
 
 		if (storageType == "uniform")
 		{
-			regex = ~/uniform ([A-Za-z0-9]+) ([A-Za-z0-9_]+)/;
+			regex = ~/uniform[ \t]+(?:(?:lowp|mediump|highp)[ \t]+)?([A-Za-z0-9]+)[ \t]+([A-Za-z0-9_]+)/;
 		}
 		else
 		{
-			regex = ~/attribute ([A-Za-z0-9]+) ([A-Za-z0-9_]+)/;
+			regex = ~/attribute[ \t]+(?:(?:lowp|mediump|highp)[ \t]+)?([A-Za-z0-9]+)[ \t]+([A-Za-z0-9_]+)/;
 		}
 
 		var fieldAccess:Access;
